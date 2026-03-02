@@ -1,0 +1,16 @@
+{
+  "name": "url-ocr",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Naver Cafe URL to markdown archive pipeline",
+  "scripts": {
+    "archive": "node archive-cafe.mjs",
+    "install:slm": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-slm.ps1"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0",
+    "sharp": "^0.34.2",
+    "tesseract.js": "^6.0.1"
+  }
+}
