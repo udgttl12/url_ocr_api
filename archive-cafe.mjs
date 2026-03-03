@@ -554,8 +554,22 @@ function selectBestDeepSeekResult(candidates, { preferCoverage = false } = {}) {
 }
 
 async function ocrDeepSeekByMode(imagePaths, config, tempDir, warnings) {
-  const passPlans = [{ label: "primary", overrides: {} }];
-  if (config.ocrMode === "high") {
+  const passPlans = [
+    {
+      label: "primary",
+      overrides:
+        config.ocrMode === "high"
+          ? {
+              deepseekPrompt: DEEPSEEK_HIGH_PROMPT,
+              deepseekCropMode: true,
+              deepseekBaseSize: Math.max(config.deepseekBaseSize, 1024),
+              deepseekMaxTokens: Math.max(config.deepseekMaxTokens, 1600),
+              deepseek4bit: false,
+            }
+          : {},
+    },
+  ];
+  if (config.ocrMode === "high" && config.deepseekHighMultipass) {
     passPlans.push(
       {
         label: "high-crop-false",
@@ -564,6 +578,7 @@ async function ocrDeepSeekByMode(imagePaths, config, tempDir, warnings) {
           deepseekCropMode: false,
           deepseekBaseSize: Math.max(config.deepseekBaseSize, 1024),
           deepseekMaxTokens: Math.max(config.deepseekMaxTokens, 1600),
+          deepseek4bit: false,
         },
       },
       {
@@ -573,6 +588,7 @@ async function ocrDeepSeekByMode(imagePaths, config, tempDir, warnings) {
           deepseekCropMode: true,
           deepseekBaseSize: Math.max(config.deepseekBaseSize, 1024),
           deepseekMaxTokens: Math.max(config.deepseekMaxTokens, 1600),
+          deepseek4bit: false,
         },
       },
     );
@@ -601,9 +617,13 @@ async function ocrDeepSeekByMode(imagePaths, config, tempDir, warnings) {
   const candidatesByImage = new Map();
   const passParallel = Math.max(1, Math.floor(config.deepseekParallel || 1));
   let preferredParallel = Math.min(passParallel, passPlans.length);
-  if (preferredParallel > 1 && !config.deepseek4bit) {
+  if (preferredParallel > 1 && (config.ocrMode === "high" || !config.deepseek4bit)) {
+    const reason =
+      config.ocrMode === "high"
+        ? "high mode forces non-4bit DeepSeek for quality, so parallel can exceed VRAM/pagefile limits"
+        : "--deepseek-4bit is false";
     warnings.push(
-      "DeepSeek parallel is disabled because --deepseek-4bit is false. On limited VRAM systems this can fail with memory/pagefile errors. Use --deepseek-4bit true to enable parallel.",
+      `DeepSeek parallel is disabled because ${reason}.`,
     );
     preferredParallel = 1;
   }
@@ -1325,7 +1345,7 @@ async function archiveArticle(config) {
 
 function printUsage() {
   const script = path.basename(__filename);
-  console.log(`Usage:\n  node ${script} --url <url> --out <directory> [--engine tesseract|winrt|qwenvl|deepseek|both|all] [--ocr-mode fast|normal|high] [--scale 4] [--parts 4] [--overlap 0.08] [--threshold true|false] [--lmstudio-host http://127.0.0.1:1234/v1] [--lmstudio-model qwen3-vl-4b-instruct] [--lmstudio-model-file ./models/Qwen3-VL-4B-Instruct-Q6_K.gguf] [--lmstudio-timeout 120000] [--lmstudio-max-tokens 1200] [--lmstudio-key <key>] [--deepseek-python .venv-deepseekocr2/Scripts/python.exe] [--deepseek-model-dir ./models/deepseek-ocr-2] [--deepseek-timeout 1800000] [--deepseek-max-tokens 1200] [--deepseek-parallel 1] [--deepseek-prompt \"<image>\\n<|grounding|>Convert the document to markdown.\"] [--slm true|false] [--slm-model llama-3.1-korean-8b-instruct] [--slm-host http://127.0.0.1:11434] [--slm-key <key>] [--slm-timeout 120000] [--cdp http://127.0.0.1:9222] [--headless true|false]\n  note: engine=all runs tesseract+winrt+qwenvl+deepseek.`);
+  console.log(`Usage:\n  node ${script} --url <url> --out <directory> [--engine tesseract|winrt|qwenvl|deepseek|both|all] [--ocr-mode fast|normal|high] [--scale 4] [--parts 4] [--overlap 0.08] [--threshold true|false] [--lmstudio-host http://127.0.0.1:1234/v1] [--lmstudio-model qwen3-vl-4b-instruct] [--lmstudio-model-file ./models/Qwen3-VL-4B-Instruct-Q6_K.gguf] [--lmstudio-timeout 120000] [--lmstudio-max-tokens 1200] [--lmstudio-key <key>] [--deepseek-python .venv-deepseekocr2/Scripts/python.exe] [--deepseek-model-dir ./models/deepseek-ocr-2] [--deepseek-timeout 1800000] [--deepseek-max-tokens 1200] [--deepseek-parallel 1] [--deepseek-high-multipass true|false] [--deepseek-prompt \"<image>\\n<|grounding|>Convert the document to markdown.\"] [--slm true|false] [--slm-model llama-3.1-korean-8b-instruct] [--slm-host http://127.0.0.1:11434] [--slm-key <key>] [--slm-timeout 120000] [--cdp http://127.0.0.1:9222] [--headless true|false]\n  note: engine=all runs tesseract+winrt+qwenvl+deepseek.`);
 }
 
 async function main() {
@@ -1350,6 +1370,7 @@ async function main() {
       "deepseek-timeout": { type: "string", default: "1800000" },
       "deepseek-max-tokens": { type: "string", default: "1200" },
       "deepseek-parallel": { type: "string", default: "1" },
+      "deepseek-high-multipass": { type: "string", default: "false" },
       "deepseek-prompt": { type: "string", default: "<image>\n<|grounding|>Convert the document to markdown." },
       "deepseek-device": { type: "string", default: "cuda" },
       "deepseek-device-map": { type: "string", default: "auto" },
@@ -1403,6 +1424,7 @@ async function main() {
     deepseekTimeoutMs: Math.max(30_000, ensureNumber(values["deepseek-timeout"], 900_000)),
     deepseekMaxTokens: Math.max(64, Math.floor(ensureNumber(values["deepseek-max-tokens"], 900))),
     deepseekParallel: Math.max(1, Math.floor(ensureNumber(values["deepseek-parallel"], 1))),
+    deepseekHighMultipass: String(values["deepseek-high-multipass"]).toLowerCase() === "true",
     deepseekPrompt: values["deepseek-prompt"] || "<image>\n<|grounding|>Convert the document to markdown.",
     deepseekDevice: values["deepseek-device"] || "cuda",
     deepseekDeviceMap: values["deepseek-device-map"] || "cuda:0",
