@@ -31,6 +31,7 @@ const DEEPSEEK_OCR_MODES = {
     deepseekImageSize: 768,
     deepseekCropMode: true,
     deepseekAttnImplementation: "eager",
+    deepseekEnhance: false,
   },
   normal: {
     scale: 4,
@@ -40,6 +41,7 @@ const DEEPSEEK_OCR_MODES = {
     deepseekImageSize: 768,
     deepseekCropMode: true,
     deepseekAttnImplementation: "eager",
+    deepseekEnhance: false,
   },
   high: {
     scale: 5,
@@ -49,6 +51,7 @@ const DEEPSEEK_OCR_MODES = {
     deepseekImageSize: 768,
     deepseekCropMode: true,
     deepseekAttnImplementation: "eager",
+    deepseekEnhance: false,
   },
 };
 
@@ -508,6 +511,7 @@ function resolveDeepSeekRunConfig(config, overrides = {}) {
     deepseekImageSize: overrides.deepseekImageSize ?? config.deepseekImageSize,
     deepseekCropMode: overrides.deepseekCropMode ?? config.deepseekCropMode,
     deepseekMaxTokens: overrides.deepseekMaxTokens ?? config.deepseekMaxTokens,
+    deepseekEnhance: overrides.deepseekEnhance ?? config.deepseekEnhance,
     deepseekTimeoutMs: overrides.deepseekTimeoutMs ?? config.deepseekTimeoutMs,
     deepseekPython: overrides.deepseekPython ?? config.deepseekPython,
   };
@@ -708,6 +712,8 @@ async function ocrDeepSeekBatch(imagePaths, config, tempDir, overrides = {}) {
     String(Boolean(runConfig.deepseekCropMode)),
     "--max-new-tokens",
     String(runConfig.deepseekMaxTokens),
+    "--enhance",
+    String(Boolean(runConfig.deepseekEnhance)),
     "--images",
     ...imagePaths,
   ];
@@ -720,6 +726,7 @@ async function ocrDeepSeekBatch(imagePaths, config, tempDir, overrides = {}) {
       env: {
         ...process.env,
         HF_MODULES_CACHE: process.env.HF_MODULES_CACHE || path.join(__dirname, ".hf_modules_cache"),
+        PYTHONNOUSERSITE: "1",
       },
     });
   } catch (err) {
@@ -889,15 +896,33 @@ async function polishTextWithSLM(rawText, config) {
   const isLmstudioSimpleChat = endpoint.includes("/api/v1/chat");
   const isOpenAIChat = endpoint.includes("/chat/completions");
 
-  const prompt = [
-    "You are fixing OCR output for Korean text.",
-    "Rules:",
-    "1) Keep original meaning and order.",
-    "2) Fix spacing, punctuation and obvious OCR mistakes only.",
-    "3) Do not summarize. Do not add new content.",
-    "4) Return plain text only.",
+  const systemPrompt = [
+    "역할: 너는 OCR 교정 전문가다.",
+    "문장의 의미를 바꾸지 말고, 최대한 원문 형태를 유지하면서 명백한 OCR 오류만 수정하라.",
     "",
-    "OCR INPUT:",
+    "절차:",
+    "1. 먼저 텍스트의 주제/도메인을 파악하라.",
+    "2. 해당 도메인의 전문 용어를 기준으로, 유사한 글자로 오인식된 단어를 교정하라.",
+    "",
+    "목표:",
+    "- 원문과의 편집 거리(Edit Distance)를 최소화하라.",
+    "- 새로운 문장을 추가하거나 삭제하지 마라.",
+    "- 문장 구조를 재구성하지 마라.",
+    "- 단어를 임의로 교체하지 마라.",
+    "- 추론하지 마라.",
+    "- 문맥 보정은 오직 명백한 OCR 오류일 때만 수행하라.",
+    "- 명백한 맞춤법 오류(예: 트랜드→트렌드)도 함께 수정하라.",
+    "",
+    "출력 규칙:",
+    "- 수정된 전체 텍스트만 출력",
+    "- 설명 금지",
+    "- 수정이 없으면 원문 그대로 출력",
+  ].join("\n");
+
+  const prompt = [
+    systemPrompt,
+    "",
+    "원문:",
     input,
   ].join("\n");
 
@@ -912,7 +937,7 @@ async function polishTextWithSLM(rawText, config) {
       if (isLmstudioSimpleChat) {
         body = {
           model: config.slmModel,
-          system_prompt: "You fix OCR output. Return plain text only.",
+          system_prompt: systemPrompt,
           input: prompt,
         };
       } else if (isOpenAIChat) {
@@ -920,7 +945,7 @@ async function polishTextWithSLM(rawText, config) {
           model: config.slmModel,
           temperature: 0.1,
           messages: [
-            { role: "system", content: "You fix OCR output. Return plain text only." },
+            { role: "system", content: systemPrompt },
             { role: "user", content: prompt },
           ],
         };
@@ -1379,6 +1404,7 @@ async function main() {
       "deepseek-base-size": { type: "string", default: "1024" },
       "deepseek-image-size": { type: "string", default: "768" },
       "deepseek-crop": { type: "string", default: "true" },
+      "deepseek-enhance": { type: "string", default: "false" },
       slm: { type: "string", default: "false" },
       "slm-model": { type: "string", default: "llama-3.1-korean-8b-instruct" },
       "slm-host": { type: "string", default: "http://127.0.0.1:11434" },
@@ -1433,6 +1459,7 @@ async function main() {
     deepseekBaseSize: Math.max(256, Math.floor(ensureNumber(values["deepseek-base-size"], 1024))),
     deepseekImageSize: Math.max(256, Math.floor(ensureNumber(values["deepseek-image-size"], 768))),
     deepseekCropMode: String(values["deepseek-crop"]).toLowerCase() !== "false",
+    deepseekEnhance: String(values["deepseek-enhance"]).toLowerCase() === "true",
     slm: String(values.slm).toLowerCase() === "true",
     slmModel: values["slm-model"] || "llama-3.1-korean-8b-instruct",
     slmHost: values["slm-host"] || "http://127.0.0.1:11434",
@@ -1462,6 +1489,9 @@ async function main() {
   }
   if (!hasCliOption("deepseek-attn")) {
     config.deepseekAttnImplementation = modeDefaults.deepseekAttnImplementation;
+  }
+  if (!hasCliOption("deepseek-enhance")) {
+    config.deepseekEnhance = modeDefaults.deepseekEnhance;
   }
 
   const result = await archiveArticle(config);

@@ -3,10 +3,12 @@ import argparse
 import json
 import re
 import sys
+import tempfile
 import time
 import warnings
 from pathlib import Path
 
+import numpy as np
 import torch
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
 from transformers.utils import logging as hf_logging
@@ -14,6 +16,36 @@ from transformers.utils import logging as hf_logging
 
 def parse_bool(value: str) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def enhance_image(image_path: str, scale: float = 2.0) -> str:
+    """Enhance image for better OCR: upsample + CLAHE + sharpen. Returns temp file path."""
+    import cv2
+
+    img = cv2.imread(image_path)
+    if img is None:
+        return image_path
+
+    # 1) Upsample with INTER_CUBIC
+    img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+    # 2) CLAHE on L channel (preserve color structure for model)
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+    lab = cv2.merge([l, a, b])
+    img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+    # 3) Mild sharpen
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+    img = cv2.filter2D(img, -1, kernel)
+
+    # Save to temp file
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    cv2.imwrite(tmp.name, img)
+    tmp.close()
+    return tmp.name
 
 
 def clean_output(text: str) -> str:
@@ -65,6 +97,8 @@ def main() -> int:
     parser.add_argument("--image-size", type=int, default=768)
     parser.add_argument("--crop-mode", default="true")
     parser.add_argument("--max-new-tokens", type=int, default=900)
+    parser.add_argument("--enhance", default="false")
+    parser.add_argument("--enhance-scale", type=float, default=2.0)
     args = parser.parse_args()
 
     model_dir = Path(args.model_dir).resolve()
@@ -105,6 +139,10 @@ def main() -> int:
     if not cuda_available:
         return fail("DeepSeek OCR requires CUDA, but torch.cuda.is_available() is False")
 
+    # Disable reduced-precision reduction to prevent boundary-value corruption
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+
     model_kwargs = {
         "trust_remote_code": True,
         "use_safetensors": True,
@@ -115,14 +153,14 @@ def main() -> int:
     if (device == "cuda" or device.startswith("cuda:")) and load_in_4bit:
         model_kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
         )
         model_kwargs["device_map"] = {"": "cuda:0"} if args.device_map != "auto" else "auto"
         model_kwargs["attn_implementation"] = args.attn_implementation
     elif device == "cuda" or device.startswith("cuda:"):
-        model_kwargs["torch_dtype"] = torch.float16
+        model_kwargs["torch_dtype"] = torch.bfloat16
         model_kwargs["attn_implementation"] = args.attn_implementation
 
     t0 = time.time()
@@ -133,14 +171,22 @@ def main() -> int:
         model = model.to(device)
     load_sec = time.time() - t0
 
+    do_enhance = parse_bool(args.enhance)
+    enhance_temps = []
+
     results = []
     for image_path in images:
         started = time.time()
+        actual_path = image_path
+        if do_enhance:
+            actual_path = enhance_image(image_path, args.enhance_scale)
+            if actual_path != image_path:
+                enhance_temps.append(actual_path)
         try:
             raw_text = model.infer(
                 tokenizer,
                 prompt=args.prompt,
-                image_file=image_path,
+                image_file=actual_path,
                 output_path=str(output_json.parent),
                 base_size=args.base_size,
                 image_size=args.image_size,
@@ -169,6 +215,13 @@ def main() -> int:
                 }
             )
 
+    # Cleanup enhanced temp files
+    for tmp_path in enhance_temps:
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
     payload = {
         "ok": True,
         "meta": {
@@ -176,6 +229,7 @@ def main() -> int:
             "device": device,
             "loadSec": round(load_sec, 3),
             "loadIn4bit": load_in_4bit,
+            "enhanced": do_enhance,
         },
         "results": results,
     }
