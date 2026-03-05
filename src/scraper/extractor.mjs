@@ -69,10 +69,7 @@ export async function extractImagesFromUrl(url) {
         };
       }
 
-      const textBlockTags = new Set([
-        "P", "LI", "BLOCKQUOTE", "PRE", "H1", "H2", "H3", "H4", "H5", "H6",
-        "TD", "TH", "SPAN", "DIV",
-      ]);
+      const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG", "IFRAME"]);
 
       const textBlocks = [];
       const imageUrls = [];
@@ -119,10 +116,9 @@ export async function extractImagesFromUrl(url) {
           const parent = node.parentElement;
           if (!parent) continue;
           const tag = parent.tagName;
-          if (!textBlockTags.has(tag)) continue;
-          if (["SCRIPT", "STYLE", "NOSCRIPT"].includes(tag)) continue;
+          if (skipTags.has(tag)) continue;
           const text = node.textContent?.trim() || "";
-          if (text.length < 2) continue;
+          if (!text) continue;
           pushText(text);
         }
       }
